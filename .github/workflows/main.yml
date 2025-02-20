@@ -1,0 +1,111 @@
+name: QuantAlgo Trading System CI/CD
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: quantalgo
+          POSTGRES_PASSWORD: quantum123
+          POSTGRES_DB: trading_bot_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Run tests
+      env:
+        DATABASE_URL: postgresql+asyncpg://quantalgo:quantum123@localhost:5432/trading_bot_db
+        REDIS_URL: redis://localhost:6379/0
+        SECRET_KEY: ${{ secrets.SECRET_KEY }}
+        ANGEL_API_KEY: ${{ secrets.ANGEL_API_KEY }}
+        ANGEL_CLIENT_ID: ${{ secrets.ANGEL_CLIENT_ID }}
+        ANGEL_PASSWORD: ${{ secrets.ANGEL_PASSWORD }}
+        ANGEL_TOKEN: ${{ secrets.ANGEL_TOKEN }}
+        AZURE_STORAGE_CONNECTION_STRING: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+      run: |
+        cd backend
+        pytest --cov=. --cov-report=xml
+        
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./backend/coverage.xml
+        fail_ci_if_error: true
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: Build and push to Azure Container Registry
+      uses: azure/docker-login@v1
+      with:
+        login-server: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+        username: ${{ secrets.REGISTRY_USERNAME }}
+        password: ${{ secrets.REGISTRY_PASSWORD }}
+    
+    - name: Build and push Docker images
+      run: |
+        docker-compose -f deployment/docker-compose.yml build
+        docker-compose -f deployment/docker-compose.yml push
+        
+    - name: Deploy to Azure Container Apps
+      uses: azure/container-apps-deploy-action@v1
+      with:
+        appSourcePath: ${{ github.workspace }}
+        acrName: ${{ secrets.REGISTRY_NAME }}
+        acrUsername: ${{ secrets.REGISTRY_USERNAME }}
+        acrPassword: ${{ secrets.REGISTRY_PASSWORD }}
+        containerAppName: 'quantalgo-trading'
+        resourceGroup: ${{ secrets.AZURE_RESOURCE_GROUP }}
+        location: 'eastus'
+        targetPort: 8000
+
+    - name: Azure logout
+      run: |
+        az logout 
